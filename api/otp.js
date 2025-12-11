@@ -1,5 +1,7 @@
-import axios from 'axios';
+// api/numbers.js
+const axios = require('axios');
 
+// --- CONFIGURATION ---
 const CREDENTIALS = {
     username: "Kami520",
     password: "Kami526"
@@ -12,17 +14,18 @@ const HEADERS = {
     "Referer": `${BASE_URL}/client/MySMSNumbers`
 };
 
+// Global variable
 let cachedCookie = null;
-
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function performLogin() {
     try {
+        // Create session instance
         const session = axios.create({
             withCredentials: true,
             headers: { ...HEADERS, "Upgrade-Insecure-Requests": "1" }
         });
 
+        // 1. Get Login Page
         const loginPage = await session.get(`${BASE_URL}/login`);
         const match = loginPage.data.match(/What is (\d+) \+ (\d+) = \?/);
 
@@ -32,6 +35,7 @@ async function performLogin() {
         const num2 = parseInt(match[2]);
         const answer = num1 + num2;
 
+        // 2. Submit Login
         const params = new URLSearchParams();
         params.append('username', CREDENTIALS.username);
         params.append('password', CREDENTIALS.password);
@@ -47,9 +51,9 @@ async function performLogin() {
             validateStatus: (status) => status >= 200 && status < 400
         });
 
+        // 3. Extract Cookie
         const cookies = loginResp.headers['set-cookie'];
         if (cookies) {
-
             const phpSession = cookies.find(c => c.startsWith('PHPSESSID'));
             if (phpSession) {
                 cachedCookie = phpSession.split(';')[0];
@@ -63,8 +67,9 @@ async function performLogin() {
     }
 }
 
-export default async function handler(req, res) {
-    const { type } = req.query;
+module.exports = async (req, res) => {
+    const { type } = req.query; 
+
     let targetUrl = "";
     if (type === 'number') {
         targetUrl = `${BASE_URL}/client/res/data_smsnumbers.php?frange=&fclient=&sEcho=3&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=true&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true&mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true&mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true&mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=asc&iSortingCols=1&_=1765267869746`;
@@ -83,8 +88,9 @@ export default async function handler(req, res) {
             headers: { ...HEADERS, "Cookie": cachedCookie }
         });
 
+        // Re-login logic
         if (typeof response.data === 'string' && (response.data.includes('login') || response.data.includes('Direct Script'))) {
-            console.log("Session expired, logging in again...");
+            console.log("Session expired, re-logging...");
             await performLogin();
             response = await axios.get(targetUrl, {
                 headers: { ...HEADERS, "Cookie": cachedCookie }
@@ -96,4 +102,4 @@ export default async function handler(req, res) {
     } catch (error) {
         return res.status(500).json({ error: error.message });
     }
-}
+};
