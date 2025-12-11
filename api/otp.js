@@ -11,52 +11,58 @@ const OTP_URL = "http://51.89.99.105/NumberPanel/client/res/data_smscdr.php?fdat
 const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
     "X-Requested-With": "XMLHttpRequest",
-    "Referer": `${BASE_URL}/client/SMSCDRStats`
+    "Referer": `${BASE_URL}/client/SMSCDRStats`,
+    "Origin": "http://51.89.99.105"
 };
 
+// گلوبل کوکی (تاکہ بار بار لاگ ان نہ کرنا پڑے)
 let cachedCookie = null;
 
 async function performLogin() {
     try {
+        console.log("🔄 Performing Login...");
         const session = axios.create({
             withCredentials: true,
-            headers: { ...HEADERS, "Upgrade-Insecure-Requests": "1" }
+            headers: { ...HEADERS, "Upgrade-Insecure-Requests": "1" },
+            validateStatus: () => true // کسی بھی سٹیٹس کوڈ پر ایرر نہ دے
         });
 
+        // 1. لاگ ان پیج گیٹ کریں
         const loginPage = await session.get(`${BASE_URL}/login`);
         
         let initialCookie = "";
         if (loginPage.headers['set-cookie']) {
             const tempCookies = loginPage.headers['set-cookie'];
             const phpSession = tempCookies.find(c => c.startsWith('PHPSESSID'));
-            if (phpSession) {
-                initialCookie = phpSession.split(';')[0];
-            }
+            if (phpSession) initialCookie = phpSession.split(';')[0];
         }
 
+        // کیپچا ڈھونڈیں
         const match = loginPage.data.match(/What is (\d+) \+ (\d+) = \?/);
-        if (!match) throw new Error("Captcha not found");
+        if (!match) {
+            // اگر کیپچا نہیں ملا تو پیج کا ایچ ٹی ایم ایل واپس بھیج دیں تاکہ پتہ چلے کیا مسئلہ ہے
+            throw { custom: true, msg: "Captcha Not Found", data: loginPage.data };
+        }
 
-        const num1 = parseInt(match[1]);
-        const num2 = parseInt(match[2]);
-        const answer = num1 + num2;
+        const answer = parseInt(match[1]) + parseInt(match[2]);
 
         const params = new URLSearchParams();
         params.append('username', CREDENTIALS.username);
         params.append('password', CREDENTIALS.password);
         params.append('capt', answer);
 
+        // 2. سائن ان کریں
         const loginResp = await session.post(`${BASE_URL}/signin`, params, {
             headers: {
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "http://51.89.99.105",
                 "Referer": `${BASE_URL}/login`,
                 "Cookie": initialCookie
             },
             maxRedirects: 0,
-            validateStatus: (status) => status >= 200 && status < 400
+            validateStatus: () => true
         });
 
+        // کوکی سیٹ کریں
         const newCookies = loginResp.headers['set-cookie'];
         if (newCookies) {
             const newPhpSession = newCookies.find(c => c.startsWith('PHPSESSID'));
@@ -71,32 +77,54 @@ async function performLogin() {
             return cachedCookie;
         }
 
-        throw new Error("No cookie returned");
+        throw { custom: true, msg: "Login Failed - No Cookie", data: loginResp.data };
+
     } catch (e) {
-        return null;
+        if (e.custom) throw e;
+        throw { custom: true, msg: "Login Network Error", data: e.message };
     }
 }
 
 module.exports = async (req, res) => {
     try {
+        // 1. اگر کوکی نہیں ہے تو لاگ ان کریں
         if (!cachedCookie) {
             await performLogin();
         }
 
+        // 2. ڈیٹا لانے کی کوشش کریں
         let response = await axios.get(OTP_URL, {
-            headers: { ...HEADERS, "Cookie": cachedCookie }
+            headers: { ...HEADERS, "Cookie": cachedCookie },
+            validateStatus: () => true // 503 یا 404 پر کریش نہ ہو، ڈیٹا دکھائے
         });
 
-        if (typeof response.data === 'string' && (response.data.includes('login') || response.data.includes('Direct Script'))) {
+        // 3. چیک کریں کہ رسپانس JSON ہے یا HTML (لاگ ان ایکسپائر)
+        const contentType = response.headers['content-type'];
+        const isHtml = typeof response.data === 'string' && (response.data.includes('<html') || response.data.includes('login'));
+
+        if (isHtml || response.status === 403 || response.status === 401) {
+            console.log("⚠️ Session Invalid. Re-logging...");
+            
+            // صرف ایک بار دوبارہ لاگ ان کریں
             await performLogin();
+            
+            // دوبارہ ریکویسٹ بھیجیں
             response = await axios.get(OTP_URL, {
-                headers: { ...HEADERS, "Cookie": cachedCookie }
+                headers: { ...HEADERS, "Cookie": cachedCookie },
+                validateStatus: () => true
             });
         }
 
-        return res.status(200).json(response.data);
+        // 4. اب جو بھی سرور نے دیا ہے، وہی یوزر کو دکھا دیں
+        // اگر JSON ہے تو JSON جائے گا، اگر HTML ایرر ہے تو وہ جائے گا
+        res.status(response.status).send(response.data);
 
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        // اگر ہمارا کوڈ کریش ہو جائے یا Login فنکشن کوئی کچرا واپس کرے
+        if (error.custom) {
+            // اگر لاگ ان کے دوران ایچ ٹی ایم ایل ملا تھا تو وہی دکھائیں
+            return res.status(500).send(error.data || error.msg);
+        }
+        res.status(500).send(error.response ? error.response.data : error.message);
     }
 };
